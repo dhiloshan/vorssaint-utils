@@ -3,6 +3,13 @@
 
 import Foundation
 
+/// One GPU client's accumulated execution time, keyed elsewhere by the
+/// registry entry that owns the client.
+struct GPUClientWork: Equatable {
+    var pid: Int32
+    var nanoseconds: Double
+}
+
 /// Cumulative interface byte counters (since boot), read from the kernel.
 /// 64-bit so they never wrap on fast links — the reason totals stay accurate.
 struct NetworkCounters: Equatable {
@@ -422,16 +429,53 @@ enum MetricFormat {
         return min(1, boundedPercentage(aggregatePercentage) / sampledTotal)
     }
 
-    /// Smooths the GPU usage readout enough to hide one-sample compositor spikes
-    /// from opening the menu panel, without hiding sustained load.
-    static func stabilizedGPUUsage(previous: Double?, current: Double) -> Double {
-        let value = current.isFinite ? max(0, min(1, current)) : 0
-        guard let previous, previous.isFinite else { return value }
-        let baseline = max(0, min(1, previous))
-        if value > baseline {
-            return min(value, baseline + 0.20)
+    /// Share of one sample window that the GPU spent executing work, from 0 to 1.
+    ///
+    /// Each value is a client's accumulated GPU time in nanoseconds. Only a
+    /// client present in both samples counts, and only its increase during
+    /// `elapsed`. A screen redraw therefore contributes the milliseconds the
+    /// GPU actually ran it, not a full second at 100%. A client that appears
+    /// mid-window is ignored: its counter already holds everything since the
+    /// client was created.
+    static func gpuWorkFraction(previous: [UInt64: Double],
+                                current: [UInt64: Double],
+                                elapsed: TimeInterval) -> Double? {
+        guard elapsed.isFinite, elapsed > 0 else { return nil }
+        var delta = 0.0
+        for (id, now) in current {
+            guard let before = previous[id],
+                  now.isFinite, before.isFinite, now >= before else { continue }
+            delta += now - before
         }
-        return baseline * 0.35 + value * 0.65
+        guard delta.isFinite else { return nil }
+        return min(1, max(0, delta / (elapsed * 1_000_000_000)))
+    }
+
+    /// Per-process share of the same window, on the 0...100 scale of the
+    /// other hardware rows. A new GPU client, or one whose process changed,
+    /// does not donate its lifetime total to this sample.
+    static func gpuWorkPercentagesByPid(previous: [UInt64: GPUClientWork],
+                                        current: [UInt64: GPUClientWork],
+                                        elapsed: TimeInterval) -> [Int32: Double] {
+        guard elapsed.isFinite, elapsed > 0 else { return [:] }
+        let elapsedNanoseconds = elapsed * 1_000_000_000
+        var workByPid: [Int32: Double] = [:]
+        for (id, client) in current {
+            guard let before = previous[id],
+                  before.pid == client.pid,
+                  client.nanoseconds.isFinite,
+                  before.nanoseconds.isFinite,
+                  client.nanoseconds >= before.nanoseconds
+            else { continue }
+            workByPid[client.pid, default: 0] += client.nanoseconds - before.nanoseconds
+        }
+        var percentages: [Int32: Double] = [:]
+        for (pid, work) in workByPid {
+            let percent = work / elapsedNanoseconds * 100
+            guard percent.isFinite, percent > 0 else { continue }
+            percentages[pid] = min(100, percent)
+        }
+        return percentages
     }
 
     /// Temperature, stored internally as Celsius and formatted in the user's

@@ -3,7 +3,6 @@
 
 import AppKit
 import Foundation
-import IOKit
 
 /// One row of the per-app breakdown shown when a System stat is expanded.
 struct ProcessUsage: Identifiable, Equatable {
@@ -664,7 +663,7 @@ final class ProcessUsageService {
 
     // MARK: - GPU
 
-    private var previousGPUSample: (time: TimeInterval, perPid: [pid_t: Double])?
+    private var previousGPUSample: (time: TimeInterval, clients: [UInt64: GPUClientWork])?
     private let gpuSampleLock = NSLock()
 
     /// Per-process GPU share since the previous call. The first call after a
@@ -693,7 +692,7 @@ final class ProcessUsageService {
         cacheLock.unlock()
 
         let sampleStartedAt: UInt64? = AppFeature.killProcess.isAvailable ? mach_absolute_time() : nil
-        let current = Self.gpuTimePerPid()
+        guard let current = GPUWorkReader.snapshot() else { return finishGPU(nil, limit: limit) }
         gpuSampleLock.lock()
         let previous = previousGPUSample
         previousGPUSample = (now, current)
@@ -703,13 +702,12 @@ final class ProcessUsageService {
               now - previous.time < max(30, sampleInterval * 4) // stale baseline => re-prime
         else { return finishGPU(nil, limit: limit) }
 
-        let elapsedNs = (now - previous.time) * 1_000_000_000
+        let percentages = MetricFormat.gpuWorkPercentagesByPid(previous: previous.clients,
+                                                               current: current,
+                                                               elapsed: now - previous.time)
         var rows: [ProcessUsage] = []
-        for (pid, total) in current {
-            guard let before = previous.perPid[pid], total > before else { continue }
-            let percent = (total - before) / elapsedNs * 100
-            guard percent >= 0.05 else { continue }
-            rows.append(ProcessUsage(pid: pid, name: "pid \(pid)", value: min(percent, 100)))
+        for (pid, percent) in percentages where percent >= 0.05 {
+            rows.append(ProcessUsage(pid: pid, name: "pid \(pid)", value: percent))
         }
         let groupedRows = reconciledUsageRows(groupedByApp(rows, sampleStartedAt: sampleStartedAt),
                                                aggregatePercentage: aggregatePercentage)
@@ -757,66 +755,6 @@ final class ProcessUsageService {
     private func limitedRows(_ cache: CachedRows?, limit: Int, now: TimeInterval, maxAge: TimeInterval) -> [ProcessUsage]? {
         guard let cache, now - cache.updatedAt <= maxAge else { return nil }
         return Array(cache.rows.prefix(limit))
-    }
-
-    /// Walks the accelerator's user clients and sums `accumulatedGPUTime`
-    /// (nanoseconds of GPU work since the context was created) per process.
-    private static func gpuTimePerPid() -> [pid_t: Double] {
-        var perPid: [pid_t: Double] = [:]
-
-        var accelIterator = io_iterator_t()
-        guard IOServiceGetMatchingServices(kIOMainPortDefault,
-                                           IOServiceMatching("IOAccelerator"),
-                                           &accelIterator) == kIOReturnSuccess else { return perPid }
-        defer { IOObjectRelease(accelIterator) }
-
-        var accelerator = IOIteratorNext(accelIterator)
-        while accelerator != 0 {
-            defer {
-                IOObjectRelease(accelerator)
-                accelerator = IOIteratorNext(accelIterator)
-            }
-
-            var clients = io_iterator_t()
-            guard IORegistryEntryGetChildIterator(accelerator, kIOServicePlane, &clients) == kIOReturnSuccess
-            else { continue }
-            defer { IOObjectRelease(clients) }
-
-            var client = IOIteratorNext(clients)
-            while client != 0 {
-                defer {
-                    IOObjectRelease(client)
-                    client = IOIteratorNext(clients)
-                }
-
-                guard let creatorRef = IORegistryEntryCreateCFProperty(
-                          client, "IOUserClientCreator" as CFString, kCFAllocatorDefault, 0),
-                      let creator = creatorRef.takeRetainedValue() as? String,
-                      let pid = Self.pid(fromCreator: creator)
-                else { continue }
-
-                guard let usageRef = IORegistryEntryCreateCFProperty(
-                          client, "AppUsage" as CFString, kCFAllocatorDefault, 0),
-                      let usage = usageRef.takeRetainedValue() as? [[String: Any]]
-                else { continue }
-
-                for entry in usage {
-                    if let time = entry["accumulatedGPUTime"] as? Double {
-                        perPid[pid, default: 0] += time
-                    } else if let time = entry["accumulatedGPUTime"] as? Int64 {
-                        perPid[pid, default: 0] += Double(time)
-                    }
-                }
-            }
-        }
-        return perPid
-    }
-
-    /// "pid 437, WindowServer" → 437
-    private static func pid(fromCreator creator: String) -> pid_t? {
-        guard creator.hasPrefix("pid ") else { return nil }
-        let digits = creator.dropFirst(4).prefix { $0.isNumber }
-        return pid_t(digits)
     }
 
 }

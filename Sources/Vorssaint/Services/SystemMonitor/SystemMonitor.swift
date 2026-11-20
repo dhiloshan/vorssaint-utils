@@ -196,6 +196,9 @@ final class SystemMonitor: ObservableObject {
     private var missedCPUUsageSamples = 0
     private var lastGPUUsage: Double?
     private var missedGPUUsageSamples = 0
+    /// Accumulated GPU time at the previous successful read. The first sample
+    /// only stores this baseline; the percentage is the work done since then.
+    private var previousGPUWork: (time: TimeInterval, clients: [UInt64: Double])?
     private var memoryCache: CachedMemoryReading?
     private var cpuTemperatureCache: CachedSensorReading?
     private var gpuTemperatureCache: CachedSensorReading?
@@ -869,22 +872,26 @@ final class SystemMonitor: ObservableObject {
                 next.peripheralBatteries = self.lastPeripheralBatterySample.devices
             }
 
-            // GPU usage is the priciest normal monitor read. When the panel first
-            // opens, skip the immediate read so the popover animation does not
-            // become a visible one-sample GPU spike. A deferred refresh follows.
+            // The registry walk is the priciest monitor read. Skip it while the
+            // panel is opening; the next sample covers that interval, and a
+            // redraw counts only for the GPU time it actually used.
             if plan.needGPUUsage {
                 let suppressGPUForUI = suppressImmediateGPU || now < suppressGPUReadsUntil
                 let shouldSampleGPU = !suppressGPUForUI && take(plan.gpuUsageKind)
                 if shouldSampleGPU {
-                    if let rawGPU = Self.readGPUUsage() {
-                        self.lastGPUUsage = MetricFormat.stabilizedGPUUsage(previous: self.lastGPUUsage,
-                                                                            current: rawGPU)
+                    switch self.readGPUUsage(now: now) {
+                    case .reading(let fraction):
+                        self.lastGPUUsage = fraction
                         self.missedGPUUsageSamples = 0
-                        if let gpu = self.lastGPUUsage { self.gpuHistory.push(gpu) }
-                    } else if self.missedGPUUsageSamples < 3 {
-                        self.missedGPUUsageSamples += 1
-                    } else {
-                        self.lastGPUUsage = nil
+                        self.gpuHistory.push(fraction)
+                    case .baseline:
+                        break
+                    case .unavailable:
+                        if self.missedGPUUsageSamples < 3 {
+                            self.missedGPUUsageSamples += 1
+                        } else {
+                            self.lastGPUUsage = nil
+                        }
                     }
                 }
                 next.gpuUsage = self.lastGPUUsage
@@ -1190,34 +1197,35 @@ final class SystemMonitor: ObservableObject {
 
     // MARK: - GPU usage
 
-    /// "Device Utilization %" published by the graphics accelerator
-    /// (AGXAccelerator on Apple Silicon).
-    private static func readGPUUsage() -> Double? {
-        var iterator = io_iterator_t()
-        guard IOServiceGetMatchingServices(kIOMainPortDefault,
-                                           IOServiceMatching("IOAccelerator"),
-                                           &iterator) == kIOReturnSuccess else { return nil }
-        defer { IOObjectRelease(iterator) }
+    private enum GPURead {
+        /// Work done since the previous sample, from 0 to 1.
+        case reading(Double)
+        /// The counters are stored, but this call has no interval to measure yet.
+        case baseline
+        /// The accelerator registry could not be read.
+        case unavailable
+    }
 
-        // The advance lives in the `while` condition so the `defer` only
-        // releases. With the advance inside the defer, returning from the loop
-        // ran it: it released the entry it was done with and then took a
-        // reference on the next service that nothing released. Machines with a
-        // second IOAccelerator (Intel dual graphics, an eGPU) leaked one
-        // io_object_t per sampling tick that way.
-        while case let entry = IOIteratorNext(iterator), entry != 0 {
-            defer { IOObjectRelease(entry) }
-            // Fetch ONLY PerformanceStatistics, not the whole (large) property
-            // tree. Copying every property each tick is what made continuous GPU
-            // sampling for the menu bar expensive.
-            guard let ref = IORegistryEntryCreateCFProperty(entry, "PerformanceStatistics" as CFString,
-                                                            kCFAllocatorDefault, 0),
-                  let stats = ref.takeRetainedValue() as? [String: Any],
-                  let utilization = stats["Device Utilization %"] as? Int
-            else { continue }
-            return Double(utilization) / 100.0
+    /// GPU use over the sample window: accumulated execution time divided by
+    /// the wall-clock interval. The accelerator's "Device Utilization %" flag
+    /// is only ever busy or idle at the instant it is read, so a redraw that
+    /// lasted a few milliseconds was reported as a full second at 100%.
+    private func readGPUUsage(now: TimeInterval) -> GPURead {
+        guard let snapshot = GPUWorkReader.snapshot() else { return .unavailable }
+        let current = snapshot.mapValues(\.nanoseconds)
+        defer { previousGPUWork = (now, current) }
+        guard let previous = previousGPUWork else { return .baseline }
+        let elapsed = now - previous.time
+        guard elapsed <= GPUWorkReader.maximumSampleGap else {
+            // The held value predates the gap. Drop it and wait for a window
+            // that is entirely after the pause, as the CPU reader does.
+            lastGPUUsage = nil
+            return .baseline
         }
-        return nil
+        guard let fraction = MetricFormat.gpuWorkFraction(previous: previous.clients,
+                                                          current: current,
+                                                          elapsed: elapsed) else { return .baseline }
+        return .reading(fraction)
     }
 
     // MARK: - Memory pressure

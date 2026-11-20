@@ -609,14 +609,44 @@ enum MetricsFeatureTests {
                     "menu bar memory keeps a placeholder when total RAM is unavailable")
         expectEqual(MetricFormat.menuBarMemoryPercent(used: 79, total: 0), "--%",
                     "menu bar memory keeps a placeholder when total RAM is invalid")
-        suite.expectClose(MetricFormat.stabilizedGPUUsage(previous: 0.03, current: 0.80), 0.23,
-                    "GPU usage readout caps one-tick upward spikes")
-        suite.expectClose(MetricFormat.stabilizedGPUUsage(previous: 0.23, current: 0.80), 0.43,
-                    "GPU usage readout still climbs during sustained load")
-        suite.expectClose(MetricFormat.stabilizedGPUUsage(previous: 0.60, current: 0.10), 0.275,
-                    "GPU usage readout falls quickly after transient load")
-        suite.expectClose(MetricFormat.stabilizedGPUUsage(previous: nil, current: 1.4), 1.0,
-                    "GPU usage readout clamps first sample")
+        suite.expectClose(MetricFormat.gpuWorkFraction(
+            previous: [1: 1_000_000_000],
+            current: [1: 1_020_000_000, 2: 50_000_000_000],
+            elapsed: 1) ?? -1, 0.02,
+            "a 20ms redraw in a one second window is 2%, and a new client's lifetime total is not this window")
+        suite.expectClose(MetricFormat.gpuWorkFraction(
+            previous: [1: 0, 2: 0],
+            current: [1: 400_000_000, 2: 400_000_000],
+            elapsed: 1) ?? -1, 0.8,
+            "GPU work from every client already being watched adds up over the same window")
+        suite.expectClose(MetricFormat.gpuWorkFraction(
+            previous: [1: 0],
+            current: [1: 5_000_000_000],
+            elapsed: 1) ?? -1, 1,
+            "GPU work beyond a full window stays on the 0...1 meter")
+        suite.expectClose(MetricFormat.gpuWorkFraction(
+            previous: [1: 2_000_000_000, 2: 0],
+            current: [1: 1_000_000_000, 2: 250_000_000],
+            elapsed: 1) ?? -1, 0.25,
+            "a GPU counter that runs backwards does not create a utilization spike")
+        suite.expect(MetricFormat.gpuWorkFraction(previous: [:], current: [1: 1], elapsed: 0) == nil,
+                     "a zero-length GPU window is not a reading")
+        let redraw = GPUClientWork(pid: 10, nanoseconds: 1_000_000_000)
+        let afterRedraw = GPUClientWork(pid: 10, nanoseconds: 1_200_000_000)
+        let newContext = GPUClientWork(pid: 10, nanoseconds: 8_000_000_000)
+        let moved = GPUClientWork(pid: 11, nanoseconds: 1_200_000_000)
+        let byPid = MetricFormat.gpuWorkPercentagesByPid(
+            previous: [7: redraw],
+            current: [7: afterRedraw, 8: newContext],
+            elapsed: 1)
+        suite.expectClose(byPid[10] ?? -1, 20,
+                    "an app's GPU row is only the work its existing client did during the window")
+        suite.expect(byPid[11] == nil, "a brand new GPU client does not appear as a full second of work")
+        suite.expect(MetricFormat.gpuWorkPercentagesByPid(
+            previous: [7: redraw],
+            current: [7: moved],
+            elapsed: 1).isEmpty,
+            "a GPU client that changed process does not attribute its past work to the new one")
         expectEqual(MetricFormat.temperature(0, unit: .celsius), "0 °C", "celsius freezing")
         expectEqual(MetricFormat.temperature(0, unit: .fahrenheit), "32 °F", "fahrenheit freezing")
         expectEqual(MetricFormat.temperature(41, unit: .fahrenheit), "106 °F", "fahrenheit rounds")
