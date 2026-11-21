@@ -110,6 +110,7 @@ enum NotchMusicVisibilityTests {
         var heldDrag = false
         var pinned = false
         var clipboardPinnedOnly = false
+        var lastSurface: (Bool, Bool, Metric?) = (false, false, nil)
         var openedByHover = false
         var sectionQuery = ""
         var highlightedSection: NotchModule?

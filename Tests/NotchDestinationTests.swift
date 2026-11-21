@@ -120,6 +120,7 @@ enum NotchDestinationContract {
         var hoverWork: DispatchWorkItem?
         var requestedDetail: MetricDetailKind?
         var detailHasPage = false
+        var lastSurface = (appPanel: false, sections: false, metric: MetricDetailKind?.none)
         var pageLayers: [NotchModule: () -> Void] = [:]
         var captureControls: AnyObject?
         var heldDrag = false
@@ -518,6 +519,12 @@ enum NotchDestinationContract {
             service.open()
             suite.expect(service.selected == (returnHome ? .controls : .files),
                    "reopening either restores the last page or returns home according to the preference")
+            service.expanded = false
+            service.lastSurface = (true, false, nil)
+            service.open()
+            suite.expect(service.showingAppPanel != returnHome,
+                   "reopening the last page brings back the app panel it closed on")
+            service.lastSurface = (false, false, nil)
             service.expanded = false
             service.open(.music)
             suite.expect(service.selected == .music, "an explicit destination always wins over the opening preference")

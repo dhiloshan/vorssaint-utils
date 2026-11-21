@@ -230,6 +230,9 @@ final class NotchService: ObservableObject {
     /// opened on, from the menu bar for instance, has nothing behind it and
     /// closes like the menu panel.
     private var detailHasPage = false
+    /// What covered the page when the island last closed, so reopening on the
+    /// last page brings back the app panel, Explore or a metric's detail too.
+    private var lastSurface = (appPanel: false, sections: false, metric: MetricDetailKind?.none)
     /// What a page shows over its own content, such as the mixer's options or
     /// the month grid, and how to close it; Escape closes it before the page.
     private var pageLayers: [NotchModule: () -> Void] = [:]
@@ -1393,24 +1396,25 @@ final class NotchService: ObservableObject {
     /// Opening without a page shows what the closed island is already
     /// presenting: a mirrored banner, or an activity unless the user turned
     /// that off. Otherwise the reopening preference decides.
-    var reopeningDestination: (module: NotchModule, appPanel: Bool, sections: Bool) {
+    var reopeningDestination: (module: NotchModule, appPanel: Bool, sections: Bool, metric: MetricDetailKind?) {
         if !expanded {
             let opensActivity = UserDefaults.standard.object(forKey: DefaultsKey.notchOpensActivity) as? Bool ?? true
             let activity = notice?.notificationID != nil ? NotchModule.notifications
                 : opensActivity ? compactActivity?.module : nil
-            if let activity, modules.contains(activity) { return (activity, false, false) }
+            if let activity, modules.contains(activity) { return (activity, false, false, nil) }
             if UserDefaults.standard.bool(forKey: DefaultsKey.notchReturnHome) {
                 let saved = UserDefaults.standard.string(forKey: DefaultsKey.notchHomeModule) ?? ""
                 switch NotchReopeningDestination(rawValue: saved) {
-                case .appPanel: return (modules.contains(.controls) ? .controls : modules.first ?? .controls, true, false)
-                case .explore: return (selected, false, true)
+                case .appPanel: return (modules.contains(.controls) ? .controls : modules.first ?? .controls, true, false, nil)
+                case .explore: return (selected, false, true, nil)
                 case nil:
                     let home = NotchModule(rawValue: saved) ?? .controls
-                    return (modules.contains(home) ? home : modules.first ?? .controls, false, false)
+                    return (modules.contains(home) ? home : modules.first ?? .controls, false, false, nil)
                 }
             }
+            return (selected, lastSurface.appPanel, lastSurface.sections, lastSurface.metric)
         }
-        return (selected, false, false)
+        return (selected, false, false, nil)
     }
 
     var reopeningModule: NotchModule {
@@ -1456,7 +1460,7 @@ final class NotchService: ObservableObject {
             sectionRow = 0
             highlightedSection = destination
         }
-        let metric = metric.flatMap { metricIsAvailable($0) ? $0 : nil }
+        let metric = (metric ?? (useReopeningSurface ? reopening.metric : nil)).flatMap { metricIsAvailable($0) ? $0 : nil }
         let closesCommandBar = showingCommandBar
         let changesPresentation = !expanded || selected != destination || closesCommandBar
             || showingAppPanel != appPanel || selectedMetric != metric || showingSections != sections
@@ -1510,6 +1514,7 @@ final class NotchService: ObservableObject {
         clipboardPinnedOnly = false
         hoverWork?.cancel(); hoverWork = nil
         if noticeExpanded { noticeWork?.cancel(); noticeWork = nil }
+        if expanded, !showingCommandBar { lastSurface = (showingAppPanel, showingSections, selectedMetric) }
         mutatePresentation(transitionContent: expanded || peeking || noticeExpanded ? .dismiss : .none) {
             if noticeExpanded { notice = nil; noticeExpanded = false }
             expanded = false
