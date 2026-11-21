@@ -32,16 +32,6 @@ struct RecentCapturesView: View {
         FeatureStrings.recentCaptures(l10n.language)
     }
 
-    private var visibleEntries: [RecentCaptureEntry] { Self.visible(history.entries) }
-
-    static func visible(_ entries: [RecentCaptureEntry]) -> [RecentCaptureEntry] {
-        entries.filter { entry in
-            entry.kind == .screenshot
-                ? AppFeature.screenshot.isAvailable
-                : AppFeature.screenRecorder.isAvailable
-        }
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if notchSize == nil { header }
@@ -73,7 +63,7 @@ struct RecentCapturesView: View {
             .buttonStyle(.plain)
             .help(text.clear)
             .accessibilityLabel(text.clear)
-            .disabled(visibleEntries.isEmpty)
+            .disabled(history.entries.isEmpty)
             if let onClose {
                 Button(action: onClose) {
                     Image(systemName: "xmark.circle.fill")
@@ -101,7 +91,7 @@ struct RecentCapturesView: View {
 
     @ViewBuilder
     private var content: some View {
-        if visibleEntries.isEmpty {
+        if history.entries.isEmpty {
             Text(text.empty)
                 .font(.system(size: 10.5))
                 .foregroundStyle(.tertiary)
@@ -111,17 +101,17 @@ struct RecentCapturesView: View {
                 .frame(maxHeight: notchSize == nil ? nil : .infinity)
                 .panelCard()
         } else if let notchSize {
-            let rows = NotchLayout.railRows(count: visibleEntries.count,
+            let rows = NotchLayout.railRows(count: history.entries.count,
                                             perRow: NotchLayout.railCapacity(width: notchSize.width, itemWidth: 236, spacing: 8),
                                             rowHeight: 88, spacing: 8, height: notchSize.height)
             let cardHeight = (notchSize.height - CGFloat(rows - 1) * 8) / CGFloat(rows)
-            NotchRail(items: visibleEntries, rows: rows, itemWidth: 236, width: notchSize.width) { entry in
+            NotchRail(items: history.entries, rows: rows, itemWidth: 236, width: notchSize.width) { entry in
                 row(entry).frame(height: cardHeight)
             }
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 7) {
-                    ForEach(visibleEntries) { entry in
+                    ForEach(history.entries) { entry in
                         row(entry)
                     }
                 }
@@ -147,7 +137,7 @@ struct RecentCapturesView: View {
                     .font(.system(size: 9.5))
                     .foregroundStyle(.tertiary)
                 HStack(spacing: 6) {
-                    Button(entry.kind == .screenshot ? text.restore : text.open) {
+                    Button(entry.kind == .screenshot && AppFeature.screenshot.isAvailable ? text.restore : text.open) {
                         history.open(entry)
                     }
                     .buttonStyle(.borderedProminent)
@@ -167,6 +157,7 @@ struct RecentCapturesView: View {
             Spacer(minLength: 0)
         }
         .panelCard()
+        .onDrag { history.fileURL(for: entry).flatMap(NSItemProvider.init(contentsOf:)) ?? NSItemProvider() }
     }
 
     @ViewBuilder

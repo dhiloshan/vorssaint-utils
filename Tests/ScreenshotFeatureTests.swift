@@ -1762,8 +1762,11 @@ enum ScreenshotFeatureTests {
                 && ScreenshotSupport.isRecentCaptureCacheFileName(
                     "\(recentID.uuidString)-thumbnail.png")
                 && !ScreenshotSupport.isRecentCaptureCacheFileName("history.json")
-                && !ScreenshotSupport.isRecentCaptureCacheFileName("../\(recentID.uuidString).png"),
-               "recent capture cleanup recognizes only app-owned UUID png names")
+                && !ScreenshotSupport.isRecentCaptureCacheFileName("../\(recentID.uuidString).png")
+                && ScreenshotSupport.isRecentCaptureCacheFileName("\(recentID.uuidString).mov")
+                && !ScreenshotSupport.isRecentCaptureCacheFileName("Screen Recording.mov")
+                && !ScreenshotSupport.isRecentCaptureCacheFileName("\(recentID.uuidString).txt"),
+               "recent capture cleanup recognizes only app-owned UUID png and video names")
         let dragRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("ScreenshotDragTests-\(UUID().uuidString)", isDirectory: true)
         let dragData = Data([0x89, 0x50, 0x4E, 0x47])

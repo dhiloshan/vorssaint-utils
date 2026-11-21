@@ -260,7 +260,36 @@ final class RecentCaptureService: ObservableObject {
         }
     }
 
-    func recordRecording(at url: URL) {
+    /// Photos and videos dropped on the island. A capture's floating
+    /// thumbnail hands over a file in a folder macOS empties soon after the
+    /// drop, so pictures are read at once and a video there is kept as a copy.
+    func importDrop(_ pasteboard: NSPasteboard) -> Bool {
+        let urls = RecentCaptureDrag.fileURLs(from: pasteboard)
+        guard !urls.isEmpty else {
+            guard let image = NSImage(pasteboard: pasteboard),
+                  let capture = ScreenshotService.imageCapture(from: image) else { return false }
+            recordScreenshot(capture)
+            return true
+        }
+        let temporary = manager.temporaryDirectory.resolvingSymlinksInPath().path + "/"
+        queue.async { [weak self] in
+            for url in urls {
+                switch RecentCaptureDrag.kind(of: url) {
+                case .screenshot:
+                    guard let image = NSImage(contentsOf: url),
+                          let capture = ScreenshotService.imageCapture(from: image) else { continue }
+                    self?.recordScreenshot(capture)
+                case .recording:
+                    self?.recordRecording(at: url, keepingCopy: url.resolvingSymlinksInPath().path.hasPrefix(temporary))
+                case nil:
+                    continue
+                }
+            }
+        }
+        return true
+    }
+
+    func recordRecording(at url: URL, keepingCopy: Bool = false) {
         guard RecentCaptureStore.isRegularFile(url) else { return }
         let id = UUID()
         let thumbnailName = "\(id.uuidString)-thumbnail.png"
@@ -271,7 +300,7 @@ final class RecentCaptureService: ObservableObject {
             let thumbnail = await Self.recordingThumbnail(at: url)
             self?.storeRecording(at: url, id: id, createdAt: createdAt,
                                  thumbnailName: thumbnailName, thumbnail: thumbnail,
-                                 generation: generation)
+                                 generation: generation, keepingCopy: keepingCopy)
         }
     }
 
@@ -280,7 +309,8 @@ final class RecentCaptureService: ObservableObject {
                                 createdAt: Date,
                                 thumbnailName: String,
                                 thumbnail: CGImage?,
-                                generation: Int) {
+                                generation: Int,
+                                keepingCopy: Bool) {
         queue.async { [weak self] in
             guard let self, self.currentClearGeneration() == generation,
                   let root = self.root, RecentCaptureStore.isRegularFile(url) else { return }
@@ -298,12 +328,20 @@ final class RecentCaptureService: ObservableObject {
                 }
                 return
             }
+            // Copied in the same step that records it, so no cleanup in
+            // between can take the copy for a file nothing refers to.
+            let stored = keepingCopy
+                ? root.appendingPathComponent(id.uuidString).appendingPathExtension(url.pathExtension.lowercased())
+                : url
+            if keepingCopy {
+                do { try self.manager.copyItem(at: url, to: stored) } catch { return }
+            }
             let entry = RecentCaptureEntry(
                 id: id,
                 kind: .recording,
                 createdAt: createdAt,
                 screenshotName: nil,
-                recordingPath: url.standardizedFileURL.path,
+                recordingPath: stored.standardizedFileURL.path,
                 thumbnailName: storedThumbnail,
                 scale: nil,
                 anchorX: nil,
@@ -350,20 +388,29 @@ final class RecentCaptureService: ObservableObject {
 
     func open(_ entry: RecentCaptureEntry) {
         hideHistoryWindow()
-        switch entry.kind {
-        case .screenshot:
+        if entry.kind == .screenshot, AppFeature.screenshot.isAvailable {
             restoreScreenshot(entry)
-        case .recording:
-            guard let url = entry.recordingURL, RecentCaptureStore.isRegularFile(url) else {
-                remove(entry)
-                NSSound.beep()
-                return
-            }
-            appDelegate()?.closePopover()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                NSWorkspace.shared.open(url)
-            }
+            return
         }
+        // Without the Screenshot feature a picture opens as a recording does.
+        guard let url = fileURL(for: entry) else {
+            remove(entry)
+            NSSound.beep()
+            return
+        }
+        appDelegate()?.closePopover()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    func fileURL(for entry: RecentCaptureEntry) -> URL? {
+        let url: URL?
+        switch entry.kind {
+        case .screenshot: url = entry.screenshotName.flatMap { Self.isSafeName($0) ? root?.appendingPathComponent($0) : nil }
+        case .recording: url = entry.recordingURL
+        }
+        return url.flatMap { RecentCaptureStore.isRegularFile($0) ? $0 : nil }
     }
 
     private func restoreScreenshot(_ entry: RecentCaptureEntry) {
@@ -410,7 +457,7 @@ final class RecentCaptureService: ObservableObject {
 
     private func pruneMissingEntries() {
         var kept: [RecentCaptureEntry] = []
-        for entry in store.entries where entryExists(entry) {
+        for entry in store.entries where fileURL(for: entry) != nil {
             kept.append(entry)
         }
         let keepIDs = cappedIDs(for: kept)
@@ -428,17 +475,6 @@ final class RecentCaptureService: ObservableObject {
         store.entries.removeAll { !keepIDs.contains($0.id) }
         store.persist()
         publish()
-    }
-
-    private func entryExists(_ entry: RecentCaptureEntry) -> Bool {
-        switch entry.kind {
-        case .screenshot:
-            guard let name = entry.screenshotName, Self.isSafeName(name), let root else { return false }
-            return RecentCaptureStore.isRegularFile(root.appendingPathComponent(name))
-        case .recording:
-            guard let url = entry.recordingURL else { return false }
-            return RecentCaptureStore.isRegularFile(url)
-        }
     }
 
     private func cappedIDs(for entries: [RecentCaptureEntry]) -> Set<UUID> {

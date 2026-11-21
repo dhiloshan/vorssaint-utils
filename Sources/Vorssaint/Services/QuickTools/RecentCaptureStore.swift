@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Vorssaint
 
+import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 struct RecentCaptureEntry: Codable, Equatable, Identifiable {
     enum Kind: String, Codable {
@@ -113,7 +115,7 @@ final class RecentCaptureStore {
 
     private func removeOrphanedCacheFiles(in root: URL) {
         let referenced = Set(entries.flatMap { entry in
-            [entry.screenshotName, entry.thumbnailName].compactMap { $0 }
+            [entry.screenshotName, entry.thumbnailName, entry.recordingURL?.lastPathComponent].compactMap { $0 }
         })
         guard let files = try? manager.contentsOfDirectory(
             at: root,
@@ -129,5 +131,29 @@ final class RecentCaptureStore {
         guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
         else { return false }
         return values.isRegularFile == true && values.isSymbolicLink != true
+    }
+}
+
+/// What a drag onto the island brings to Recent Captures: only photos and
+/// videos, so any other file still goes to the Shelf.
+enum RecentCaptureDrag {
+    /// How far from the island a drag opens it.
+    static let approach: CGFloat = 120
+
+    static func kind(of url: URL) -> RecentCaptureEntry.Kind? {
+        guard url.isFileURL, let type = UTType(filenameExtension: url.pathExtension) else { return nil }
+        if type.conforms(to: .image) { return .screenshot }
+        if type.conforms(to: .movie) { return .recording }
+        return nil
+    }
+
+    static func fileURLs(from pasteboard: NSPasteboard) -> [URL] {
+        pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
+
+    static func looksLikeMedia(_ pasteboard: NSPasteboard) -> Bool {
+        let urls = fileURLs(from: pasteboard)
+        guard urls.isEmpty else { return urls.allSatisfy { kind(of: $0) != nil } }
+        return pasteboard.availableType(from: [.png, .tiff]) != nil
     }
 }

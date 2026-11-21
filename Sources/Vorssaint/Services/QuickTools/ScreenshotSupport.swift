@@ -232,9 +232,12 @@ enum ScreenshotSupport {
     static let recentCaptureMaximumBytes: Int64 = 256 * 1024 * 1024
 
     static func isRecentCaptureCacheFileName(_ name: String) -> Bool {
-        guard name == URL(fileURLWithPath: name).lastPathComponent,
-              name.lowercased().hasSuffix(".png") else { return false }
-        let stem = String(name.dropLast(4))
+        let file = URL(fileURLWithPath: name)
+        guard name == file.lastPathComponent else { return false }
+        let stem = file.deletingPathExtension().lastPathComponent
+        // A video dropped from a folder macOS empties is kept here as a copy.
+        if RecentCaptureDrag.kind(of: file) == .recording { return UUID(uuidString: stem) != nil }
+        guard name.lowercased().hasSuffix(".png") else { return false }
         if UUID(uuidString: stem) != nil { return true }
         let suffix = "-thumbnail"
         return stem.hasSuffix(suffix)

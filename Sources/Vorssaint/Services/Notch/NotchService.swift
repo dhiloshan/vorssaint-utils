@@ -187,6 +187,11 @@ final class NotchService: ObservableObject {
     private var captureControlsSubscription: AnyCancellable?
     private var captureControlsWork: DispatchWorkItem?
     private var heldDrag = false
+    private var mediaDragMonitor: Any?
+    /// The drag pasteboard as the last press found it: only a drag started
+    /// since then is new content rather than a window being moved.
+    private var mediaDragBaseline = 0
+    private var mediaDragHold: Timer?
     /// Closes the island once a shelf tile dragged out of it stays out.
     private var shelfDragExitWork: DispatchWorkItem?
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
@@ -1355,7 +1360,8 @@ final class NotchService: ObservableObject {
         dragPlaceholder = false
         endFileDrop()
         fileInteractionActive = false
-        heldDrag = false
+        endMediaDragHold()
+        if let mediaDragMonitor { NSEvent.removeMonitor(mediaDragMonitor); self.mediaDragMonitor = nil }
         shelfDragExitWork?.cancel(); shelfDragExitWork = nil
         selectedMetric = nil
         pinned = false
@@ -2033,7 +2039,7 @@ final class NotchService: ObservableObject {
     }
 
     func fileDragChanged(_ active: Bool, internalDrag: Bool = false) {
-        guard running, !suspended, internalDrag || NotchSupport.routesShelf() else { return }
+        guard running, !suspended, internalDrag || (NotchSupport.routesShelf() && mediaDragHold == nil) else { return }
         heldDrag = active && internalDrag
         if !heldDrag { shelfDragExitWork?.cancel(); shelfDragExitWork = nil }
         if active, !internalDrag, NotchSupport.revealsShelfDrag(), !expanded {
@@ -2341,6 +2347,76 @@ final class NotchService: ObservableObject {
             reactMascot(.celebrate, patience: 30)
         }
         return accepted
+    }
+
+    /// Photos and videos go to Recent Captures unless the Files page is open to take them.
+    private func takesMediaDrop(_ pasteboard: NSPasteboard) -> Bool {
+        acceptsUserInteraction && captureControls == nil && modules.contains(.captures)
+            && directMediaDropWorkspace == nil && !(expanded && selected == .files)
+            && RecentCaptureDrag.looksLikeMedia(pasteboard)
+    }
+
+    /// Opens Recent Captures as a click does, over whatever the island shows,
+    /// and keeps it open until the drag ends, dropped there or not.
+    private func holdForMediaDrag() {
+        guard mediaDragHold == nil else { return }
+        heldDrag = true
+        dragPlaceholder = false
+        if captureContent != nil {
+            let close = captureClose
+            clearCapture()
+            close?()
+        }
+        open(.captures)
+        let hold = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            if NSEvent.pressedMouseButtons & 1 == 0 { self?.endMediaDragHold() }
+        }
+        RunLoop.main.add(hold, forMode: .common)
+        mediaDragHold = hold
+    }
+
+    private func endMediaDragHold() {
+        mediaDragHold?.invalidate()
+        mediaDragHold = nil
+        heldDrag = false
+    }
+
+    private func acceptMediaDrop(_ pasteboard: NSPasteboard) -> Bool {
+        guard RecentCaptureService.shared.importDrop(pasteboard) else { return false }
+        endMediaDragHold()
+        open(.captures)
+        reactMascot(.celebrate, patience: 30)
+        return true
+    }
+
+    /// Drags from other apps reach the island's drop target only once they
+    /// are over it; this sees a photo or video coming while it is still near.
+    private func syncMediaDragMonitor() {
+        let wanted = modules.contains(.captures)
+        if wanted, mediaDragMonitor == nil {
+            mediaDragBaseline = NSPasteboard(name: .drag).changeCount
+            mediaDragMonitor = NSEvent.addGlobalMonitorForEvents(
+                matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged]) { [weak self] event in
+                    self?.mediaDragMoved(event)
+                }
+        } else if !wanted, let mediaDragMonitor {
+            NSEvent.removeMonitor(mediaDragMonitor)
+            self.mediaDragMonitor = nil
+        }
+    }
+
+    private func mediaDragMoved(_ event: NSEvent) {
+        let pasteboard = NSPasteboard(name: .drag)
+        guard event.type == .leftMouseDragged else {
+            mediaDragBaseline = pasteboard.changeCount
+            return
+        }
+        let near = geometry.frame(for: surfaceSize).insetBy(dx: -RecentCaptureDrag.approach, dy: -RecentCaptureDrag.approach)
+        guard mediaDragHold == nil, near.contains(NSEvent.mouseLocation),
+              pasteboard.changeCount != mediaDragBaseline else { return }
+        // Each drag is read once, whatever it holds.
+        mediaDragBaseline = pasteboard.changeCount
+        if takesMediaDrop(pasteboard) { holdForMediaDrag() }
     }
 
     @discardableResult
@@ -3660,14 +3736,22 @@ final class NotchService: ObservableObject {
             windowHost?.setHoverHandler { [weak self] in self?.hover($0) }
             panel?.title = FeatureStrings.notch(L10n.shared.language).title
         }
-        if modules.contains(.files), AppFeature.shelf.isAvailable {
+        if modules.contains(.captures) || (modules.contains(.files) && AppFeature.shelf.isAvailable) {
             windowHost?.setFileDropActions(NotchFileDropActions(
                 canAccept: { [weak self] pasteboard in
-                    self?.canAcceptFileDrop(pasteboard) == true && !ShelfService.shared.isInternalDragActive
-                        && ShelfService.shared.canAcceptPasteboard(pasteboard)
+                    guard let self else { return false }
+                    return self.takesMediaDrop(pasteboard)
+                        || (self.canAcceptFileDrop(pasteboard) && !ShelfService.shared.isInternalDragActive
+                            && ShelfService.shared.canAcceptPasteboard(pasteboard))
                 },
-                enter: { [weak self] in self?.beginFileDrop($0) },
-                accept: { [weak self] in self?.accept($0) == true },
+                enter: { [weak self] pasteboard in
+                    guard let self else { return }
+                    if self.takesMediaDrop(pasteboard) { self.holdForMediaDrag() } else { self.beginFileDrop(pasteboard) }
+                },
+                accept: { [weak self] pasteboard in
+                    guard let self else { return false }
+                    return self.takesMediaDrop(pasteboard) ? self.acceptMediaDrop(pasteboard) : self.accept(pasteboard)
+                },
                 exit: { [weak self] in
                     guard let self else { return }
                     self.endFileDrop()
@@ -3675,6 +3759,7 @@ final class NotchService: ObservableObject {
                 },
                 update: { [weak self] in self?.updateFileDrop(at: $0) == true }))
         } else { windowHost?.setFileDropActions(nil) }
+        syncMediaDragMonitor()
         panel?.sharingType = NotchSupport.showsInCaptures() ? .readOnly : .none
         updateFullscreenVisibility(displayID: screen.notchDisplayID)
     }

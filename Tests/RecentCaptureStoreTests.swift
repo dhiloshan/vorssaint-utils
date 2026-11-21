@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Vorssaint
 
+import AppKit
 import Foundation
 
 enum RecentCaptureStoreTests {
@@ -105,6 +106,22 @@ enum RecentCaptureStoreTests {
                     && !manager.fileExists(atPath: recordingThumbnail.path),
                    "clearing recording history keeps the original video")
 
+            let copiedID = UUID()
+            let copied = root.appendingPathComponent("\(copiedID.uuidString).mov")
+            let strayCopy = root.appendingPathComponent("\(UUID().uuidString).mp4")
+            try Data("dropped video".utf8).write(to: copied)
+            try Data("stray video".utf8).write(to: strayCopy)
+            unreadable.entries = [RecentCaptureEntry(
+                id: copiedID, kind: .recording, createdAt: Date(),
+                screenshotName: nil, recordingPath: copied.path, thumbnailName: nil, scale: nil,
+                anchorX: nil, anchorY: nil, anchorWidth: nil, anchorHeight: nil)]
+            suite.expect(unreadable.persist() && manager.fileExists(atPath: copied.path)
+                    && !manager.fileExists(atPath: strayCopy.path),
+                   "a dropped video's copy stays while it is listed, and a stray copy is cleaned")
+            unreadable.entries = []
+            suite.expect(unreadable.persist() && !manager.fileExists(atPath: copied.path),
+                   "a dropped video's copy goes with its entry")
+
             let link = root.appendingPathComponent("\(UUID().uuidString).png")
             try manager.createSymbolicLink(at: link, withDestinationURL: unrelated)
             suite.expect(unreadable.persist() && manager.fileExists(atPath: link.path)
@@ -119,5 +136,28 @@ enum RecentCaptureStoreTests {
         } catch {
             suite.expect(false, "capture history storage fixtures: \(error)")
         }
+
+        let file = { (path: String) in URL(fileURLWithPath: path) }
+        suite.expect(RecentCaptureDrag.kind(of: file("/tmp/Shot.PNG")) == .screenshot
+                && RecentCaptureDrag.kind(of: file("/tmp/photo.heic")) == .screenshot
+                && RecentCaptureDrag.kind(of: file("/tmp/Screen Recording.mov")) == .recording
+                && RecentCaptureDrag.kind(of: file("/tmp/clip.mp4")) == .recording
+                && RecentCaptureDrag.kind(of: file("/tmp/notes.txt")) == nil
+                && RecentCaptureDrag.kind(of: file("/tmp/song.mp3")) == nil
+                && RecentCaptureDrag.kind(of: URL(string: "https://example.com/a.png")!) == nil,
+               "only photo and video files count as captures")
+        func board(files: [String], png: Bool = false) -> NSPasteboard {
+            let board = NSPasteboard.withUniqueName()
+            board.clearContents()
+            if !files.isEmpty { board.writeObjects(files.map { file($0) as NSURL }) }
+            if png { board.setData(Data([0x89, 0x50, 0x4E, 0x47]), forType: .png) }
+            return board
+        }
+        let boards = [board(files: ["/tmp/Screenshot.png"], png: true), board(files: [], png: true),
+                      board(files: ["/tmp/a.mov", "/tmp/b.jpg"]), board(files: ["/tmp/notes.txt"]),
+                      board(files: ["/tmp/a.png", "/tmp/report.pdf"]), board(files: [])]
+        defer { boards.forEach { $0.releaseGlobally() } }
+        suite.expect(boards.map(RecentCaptureDrag.looksLikeMedia) == [true, true, true, false, false, false],
+               "a screenshot thumbnail, picture data or only photos and videos go to Recent Captures; anything else to the Shelf")
     }
 }
