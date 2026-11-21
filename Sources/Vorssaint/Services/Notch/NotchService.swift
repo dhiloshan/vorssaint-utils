@@ -188,8 +188,9 @@ final class NotchService: ObservableObject {
     private var captureControlsWork: DispatchWorkItem?
     private var heldDrag = false
     private var mediaDragMonitor: Any?
-    /// The drag pasteboard as the last press found it: only a drag started
-    /// since then is new content rather than a window being moved.
+    /// The drag pasteboard as the last gesture left it: only a drag started
+    /// since then is new content rather than a window being moved. Read on
+    /// release, not press, since some apps start their drag on the press.
     private var mediaDragBaseline = 0
     private var mediaDragHold: Timer?
     /// Closes the island once a shelf tile dragged out of it stays out.
@@ -2396,7 +2397,7 @@ final class NotchService: ObservableObject {
         if wanted, mediaDragMonitor == nil {
             mediaDragBaseline = NSPasteboard(name: .drag).changeCount
             mediaDragMonitor = NSEvent.addGlobalMonitorForEvents(
-                matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged]) { [weak self] event in
+                matching: [.leftMouseUp, .leftMouseDragged]) { [weak self] event in
                     self?.mediaDragMoved(event)
                 }
         } else if !wanted, let mediaDragMonitor {
